@@ -1,0 +1,471 @@
+﻿Program.Sub.ScreenSU.Start
+Program.Sub.ScreenSU.End
+
+Program.Sub.Preflight.Start
+
+Variable.Global.iBal.Declare(Long,0)
+Variable.Global.sCompID.Declare(String)
+Variable.Global.sCompName.Declare(String)
+Variable.Global.sBankName.Declare(String)
+Variable.Global.sRtrNum.Declare(String)
+Variable.Global.sAcctNum.Declare(String)
+Variable.Global.sState.Declare(String)
+Variable.UDT.uVendor.Define("Vendor",String,VENDOR_ID)
+Variable.UDT.uVendor.Define("Chk_Amt",Float)
+Variable.uGlobal.uVendor.Declare("uVendor")
+Program.Sub.Preflight.End
+
+Program.Sub.Main.Start
+'ERM
+
+
+
+'This ACH file is fixed width delimited
+F.ODBC.Connection!con.OpenConnection(V.Ambient.PDSN,V.Ambient.PUser,V.Ambient.PPass)
+F.Intrinsic.Control.CallSub(Check)
+
+Program.Sub.Main.End
+
+Program.Sub.Check.Start
+F.Intrinsic.Control.SetErrorHandler("Check_Err")
+F.Intrinsic.Control.ClearErrors
+
+V.Local.sSQL.Declare(String)
+V.Local.sError.Declare(String)
+V.Local.sFileName.Declare(String)
+V.Local.sTemp.Declare(String)
+V.Local.sUpload.Declare(String)
+V.Local.sCountry.Declare(String)
+V.Local.sCanAcctNum.Declare(String)
+V.Local.sUSAcctNum.Declare(String)
+V.Local.sRouting.Declare(String)
+V.Local.sStreet.Declare(String)
+V.Local.sState.Declare(String)
+V.Local.sZipCode.Declare(String)
+V.Local.sBank.Declare(String)
+V.Local.sBranch.Declare(String)
+V.Local.sCanada.Declare(String)
+V.Local.sCity.Declare(String)
+V.Local.sAmt.Declare(String)
+V.Local.i.Declare(Long)
+V.Local.fTemp.Declare(Float)
+V.Local.iPos.Declare(Long)
+V.uGlobal.uVendor.Redim(-1,-1)
+V.Local.BankAccountEnc.Declare(byteArray)
+V.Local.sTest.Declare(String)
+
+'BN Jan 25, 2017
+V.Local.sSql.Set("Select distinct p.Vendor_ID , p.Vendor_Name as Name, v.Email as Email, s.Total ")
+F.Intrinsic.String.Build("{0} {1}",V.Local.sSql, " from V_ACH_Payment p ", V.Local.sSql) 
+F.Intrinsic.String.Build("{0} {1}",V.Local.sSql, " join V_Vendor_ADDL v on p.Vendor_ID = v.Vendor ", V.Local.sSql)  
+F.Intrinsic.String.Build("{0} {1}",V.Local.sSql, " join (select Vendor_ID as vendor_to_sum, sum(Check_AMT) as Total from V_ACH_Payment where Exported = '' group by Vendor_ID) as s on s.Vendor_to_sum = p.Vendor_ID ", V.Local.sSql) 
+F.Intrinsic.String.Build("{0} {1}",V.Local.sSql, " where Exported = '' ", V.Local.sSql)
+
+f.Data.DataTable.CreateFromSQL("VendorHeader_DT","con",v.Local.sSQL,true)
+
+Function.Data.Dictionary.CreateFromSQL("dict", "con", "Select Vendor as Vendor_ID, Name_Vendor as Name from Vendor_Master where REC = '1'")
+Function.Data.Dictionary.SetDefaultReturn("dict", "NaN")
+F.Data.dataTable.FillFromDictionary("VendorHeader_DT", "dict","Vendor_ID", "Name")
+F.Data.Dictionary.Close("dict")
+
+'OLD ARC 906:
+'This bank does not accept ACH File containing duplicate vendors
+F.Intrinsic.UI.InvokeWaitDialog("Creating ACH File...","Please Wait...")
+V.Local.sSql.Set("Select Vendor_ID from V_ACH_PAYMENT where EXPORTED = ''")
+F.ODBC.Connection!con.OpenRecordsetRO("rst",V.Local.sSql)
+F.Intrinsic.Control.If(V.ODBC.con!rst.EOF,=,True)
+	F.Intrinsic.UI.Msgbox("No ACH records found!","GAB Message")
+	F.Intrinsic.Control.CallSub(Unload)
+F.Intrinsic.Control.Else
+	F.Intrinsic.Variable.LoadUDTFromRecordset("con","rst","V.uGlobal.uVendor",True)
+	F.Intrinsic.Variable.UDTMultiFlagDuplicates(V.uGlobal.uVendor!Vendor)
+	F.Intrinsic.Variable.UDTDeleteFlagged(V.uGlobal.uVendor)
+F.Intrinsic.Control.EndIf
+F.ODBC.con!rst.Close
+
+'Adding Chk_Amt together for same vendor
+F.Intrinsic.Control.For(V.Local.i,V.uGlobal.uVendor.LBound,V.uGlobal.uVendor.UBound,1)
+V.Local.fTemp.Set(0)
+F.Intrinsic.String.Concat("Select * from V_ACH_PAYMENT where EXPORTED = '' and Vendor_ID = '",V.uGlobal.uVendor(v.Local.i)!Vendor,"'",V.Local.sSQL)
+F.ODBC.Connection!con.OpenRecordsetRO("rst",V.Local.sSql)
+F.Intrinsic.Control.If(V.ODBC.con!rst.EOF,=,False)
+	F.Intrinsic.Control.DoUntil(V.ODBC.con!rst.EOF,=,True)
+		F.Intrinsic.Math.Add(V.Local.fTemp,V.ODBC.con!rst.FieldValFloat!Check_Amt,V.Local.fTemp)
+		V.uGlobal.uVendor(v.Local.i)!Chk_Amt.Set(V.Local.fTemp)
+		F.ODBC.con!rst.MoveNext
+	F.Intrinsic.Control.Loop
+F.Intrinsic.Control.EndIf
+F.ODBC.con!rst.Close
+F.Intrinsic.Control.Next(V.Local.i)
+
+'Creating one row per vendor in the text file
+F.Intrinsic.Control.For(V.Local.i,V.uGlobal.uVendor.LBound,V.uGlobal.uVendor.UBound,1)
+F.Intrinsic.UI.ChangeWaitStatus("Creating ACH File",V.Local.i,V.uGlobal.uVendor.LBound,V.uGlobal.uVendor.UBound)
+F.Intrinsic.String.Concat("Select * from V_ACH_PAYMENT where EXPORTED = '' and Vendor_ID = '",V.uGlobal.uVendor(v.Local.i)!Vendor,"'",V.Local.sSQL)
+F.ODBC.Connection!con.OpenRecordsetRW("rst",V.Local.sSql)
+F.Intrinsic.Control.If(V.ODBC.con!rst.EOF,=,False)
+	'=======CREATE FILE=======================
+	'Vendor Info
+	F.Intrinsic.String.Concat("Select * From V_Vendor_Master Where Vendor = '",V.uGlobal.uVendor(v.Local.i)!Vendor,"'",V.Local.sSQL)
+	F.ODBC.Connection!con.OpenRecordsetRO("rstVendor",V.Local.sSQL)
+	F.Intrinsic.Control.If(V.ODBC.con!rstVendor.EOF,=,False)
+		F.Intrinsic.Control.If(V.ODBC.con!rstVendor.FieldValTrim!COUNTRY,=,"USA")
+			'Vendor ID - 6 spaces
+			F.Intrinsic.String.RPad(V.ODBC.con!rst.FieldValTrim!VENDOR_ID," ",6,V.Local.sTemp)
+			F.Intrinsic.String.Concat(V.Local.sUpload,V.Local.sTemp,V.Local.sUpload)
+			'Vendor Name - 30 spaces
+			F.Intrinsic.String.StripCharacters(V.ODBC.con!rst.FieldValTrim!VENDOR_NAME,V.Local.sTemp)
+			F.Intrinsic.String.RPad(V.Local.sTemp," ",30,V.Local.sTemp)
+			F.Intrinsic.String.Concat(V.Local.sUpload,V.Local.sTemp,V.Local.sUpload)
+			'Amount - 10 spaces
+			F.Intrinsic.String.Instr(V.uGlobal.uVendor(v.Local.i)!Chk_Amt,".",V.Local.iPos)
+			F.Intrinsic.Control.If(V.Local.iPos,>,0)
+				F.Intrinsic.String.Split(V.uGlobal.uVendor(v.Local.i)!Chk_Amt,".",V.Local.sTemp)
+				F.Intrinsic.String.LPad(V.Local.sTemp(0),"0",8,V.Local.sTemp(0))
+				F.Intrinsic.String.RPad(V.Local.sTemp(1),"0",2,V.Local.sTemp(1))
+				F.Intrinsic.String.Concat(V.Local.sUpload,V.Local.sTemp(0),V.Local.sTemp(1),V.Local.sUpload)
+			F.Intrinsic.Control.Else
+				F.Intrinsic.String.LPad(V.uGlobal.uVendor(v.Local.i)!Chk_Amt,"0",8,V.Local.sTemp(0))
+				F.Intrinsic.String.RPad(V.Local.sAmt,"0",2,V.Local.sAmt)
+				F.Intrinsic.String.Concat(V.Local.sUpload,V.Local.sTemp(0),V.Local.sAmt,V.Local.sUpload)
+			F.Intrinsic.Control.EndIf
+			'Routing Number -9 spaces
+			F.Intrinsic.String.LPad(V.ODBC.con!rst.FieldValTrim!BANK_ROUTING," ",9,V.Local.sRouting)
+			F.Intrinsic.String.Concat(V.Local.sUpload,V.Local.sRouting,V.Local.sUpload)
+			
+			'TR - Adding decryption for 2019.1+
+			'US bank acct - 17 spaces
+			F.Intrinsic.Control.If(V.Caller.GSSVersion,<,"2019.1")
+				F.Intrinsic.String.RPad(V.ODBC.con!rst.FieldValTrim!BANK_ACCOUNT," ",17,V.Local.sUSAcctNum)
+			F.Intrinsic.Control.Else
+				F.Global.Encryption.Decrypt(V.ODBC.con!rst.FieldVal!BANK_ACCOUNT_ENC,V.Local.sUSAcctNum)
+				F.Intrinsic.String.RPad(V.Local.sUSAcctNum," ",17,V.Local.sUSAcctNum)
+			F.Intrinsic.Control.EndIf
+			
+			F.Intrinsic.String.Concat(V.Local.sUpload,V.Local.sUSAcctNum,V.Local.sUpload)
+			'=====Customer address====
+			'Street - 35 spaces
+			F.Intrinsic.String.LPad(V.ODBC.con!rstVendor.FieldValTrim!ADDRESS1," ",35,V.Local.sStreet)
+			F.Intrinsic.String.Concat(V.Local.sUpload,V.Local.sStreet,V.Local.sUpload)
+			'City and State - 35 spaces
+			V.Local.sCity.Set(V.ODBC.con!rstVendor.FieldValTrim!CITY)
+			V.Local.sState.Set(V.ODBC.con!rstVendor.FieldValTrim!STATE)
+			F.Intrinsic.Control.CallSub(State,"State",V.Local.sState)
+			F.Intrinsic.String.Concat(V.Local.sCity.Trim,"*",V.Global.sState.Trim,"\",V.Local.sTemp)
+			F.Intrinsic.String.LPad(V.Local.sTemp," ",35,V.Local.sTemp)
+			F.Intrinsic.String.Concat(V.Local.sUpload,V.Local.sTemp,V.Local.sUpload)
+			'Country and Zipcode - 35 spaces
+			V.Local.sCountry.Set("USA")
+			F.Intrinsic.String.Concat(V.Local.sCountry,"*",V.ODBC.con!rstVendor.FieldValTrim!CODE_ZIP,"\",V.Local.sTemp)
+			F.Intrinsic.String.LPad(V.Local.sTemp," ",35,V.Local.sTemp)
+			F.Intrinsic.String.Concat(V.Local.sUpload,V.Local.sTemp,V.Local.sUpload)
+			' USA.txt
+			F.Intrinsic.String.Concat(V.Local.sUpload,V.Ambient.NewLine,V.Local.sUpload)
+		F.Intrinsic.Control.Else
+			F.Intrinsic.Control.If(V.ODBC.con!rstVendor.FieldValTrim!COUNTRY,=,"CANADA")
+				'Vendor ID - 6 spaces
+				F.Intrinsic.String.RPad(V.ODBC.con!rst.FieldValTrim!VENDOR_ID," ",6,V.Local.sTemp)
+				F.Intrinsic.String.Concat(V.Local.sCanada,V.Local.sTemp,V.Local.sCanada)
+				'Vendor Name - 30 spaces
+				F.Intrinsic.String.StripCharacters(V.ODBC.con!rst.FieldValTrim!VENDOR_NAME,V.Local.sTemp)
+				F.Intrinsic.String.RPad(V.Local.sTemp," ",30,V.Local.sTemp)
+				F.Intrinsic.String.Concat(V.Local.sCanada,V.Local.sTemp,V.Local.sCanada)
+				'Amount - 10 spaces
+				F.Intrinsic.String.Instr(V.uGlobal.uVendor(v.Local.i)!Chk_Amt,".",V.Local.iPos)
+				F.Intrinsic.Control.If(V.Local.iPos,>,0)
+					F.Intrinsic.String.Split(V.uGlobal.uVendor(v.Local.i)!Chk_Amt,".",V.Local.sTemp)
+					F.Intrinsic.String.LPad(V.Local.sTemp(0),"0",8,V.Local.sTemp(0))
+					F.Intrinsic.String.RPad(V.Local.sTemp(1),"0",2,V.Local.sTemp(1))
+					F.Intrinsic.String.Concat(V.Local.sCanada,V.Local.sTemp(0),V.Local.sTemp(1),V.Local.sCanada)
+				F.Intrinsic.Control.Else
+					F.Intrinsic.String.LPad(V.uGlobal.uVendor(v.Local.i)!Chk_Amt,"0",8,V.Local.sTemp(0))
+					F.Intrinsic.String.RPad(V.Local.sAmt,"0",2,V.Local.sAmt)
+					F.Intrinsic.String.Concat(V.Local.sCanada,V.Local.sTemp(0),V.Local.sAmt,V.Local.sCanada)
+				F.Intrinsic.Control.EndIf
+				'Bank - 4 spaces
+				F.Intrinsic.String.Left(V.ODBC.con!rst.FieldValTrim!BANK_ROUTING,4,V.Local.sBank)
+				F.Intrinsic.String.LPad(V.Local.sBank," ",4,V.Local.sBank)
+				F.Intrinsic.String.Concat(V.Local.sCanada,V.Local.sBank,V.Local.sCanada)
+				'Branch - 5 spaces
+				F.Intrinsic.String.Right(V.ODBC.con!rst.FieldValTrim!BANK_ROUTING,5,V.Local.sBranch)
+				F.Intrinsic.String.LPad(V.Local.sBranch," ",5,V.Local.sBranch)
+				F.Intrinsic.String.Concat(V.Local.sCanada,V.Local.sBranch,V.Local.sCanada)
+			
+				'Canadian bank acct - 18 spaces
+				F.Intrinsic.Control.If(V.Caller.GSSVersion,<,"2019.1")
+					F.Intrinsic.String.RPad(V.ODBC.con!rst.FieldVal!BANK_ACCOUNT," ",18,V.Local.sCanAcctNum)
+				F.Intrinsic.Control.Else
+					'V.Local.BankAccountEnc.Set(V.ODBC.con!rst.FieldVal!BANK_ACCOUNT_ENC)
+					F.Global.Encryption.Decrypt(V.ODBC.con!rst.FieldVal!BANK_ACCOUNT_ENC,V.Local.sCanAcctNum)
+					F.Intrinsic.String.RPad(V.Local.sCanAcctNum," ",18,V.Local.sCanAcctNum)
+				F.Intrinsic.Control.EndIf
+				
+				F.Intrinsic.String.Concat(V.Local.sCanada,V.Local.sCanAcctNum,V.Local.sCanada)
+				'Seperate file for upload
+				F.Intrinsic.String.Concat(V.Local.sCanada,V.Ambient.NewLine,V.Local.sCanada)
+			F.Intrinsic.Control.EndIf
+		F.Intrinsic.Control.EndIf
+	F.Intrinsic.Control.EndIf
+	F.ODBC.con!rstVendor.Close
+F.Intrinsic.Control.EndIf
+F.ODBC.con!rst.Close
+F.Intrinsic.Control.Next(V.Local.i)
+
+'file destination - customer will upload two seperate files one for USA transactions and one for Canada Transactions
+F.Intrinsic.String.Concat(V.Caller.FilesDir,"\ACH\USA.txt",V.Local.sFileName)
+F.Intrinsic.File.String2File(V.Local.sFileName,V.Local.sUpload)
+F.Intrinsic.String.Concat(V.Caller.FilesDir,"\ACH\CAN.txt",V.Local.sFileName)
+F.Intrinsic.File.String2File(V.Local.sFileName,V.Local.sCanada)
+
+F.Intrinsic.UI.CloseWaitDialog
+F.Intrinsic.UI.Msgbox("Export Successful")
+
+'BN Jan 25, 2017
+f.Intrinsic.Control.CallSub(send_emails)
+F.Intrinsic.UI.Msgbox("Apart from invalid vendor emails, all other emails were sent successful!")
+
+'Changing the records in database as having been exported
+F.Intrinsic.String.Concat("Update ACH_PAYMENT Set EXPORTED = 'Y' Where EXPORTED = ''","",V.local.sSQL)
+F.ODBC.Connection!con.Execute(V.Local.sSQL)
+
+F.Intrinsic.Control.CallSub(Unload)
+f.Intrinsic.Control.ExitSub
+
+F.Intrinsic.Control.Label("Check_Err")
+F.Intrinsic.Control.If(V.Ambient.ErrorNumber,<>,0)
+	Function.Intrinsic.String.Concat("Project: GCG_4330_Email_ACH.gas",V.Ambient.Newline,V.Ambient.Newline,"Subroutine: ",V.Ambient.CurrentSubroutine,V.Ambient.NewLine,"Error Occurred ",V.Ambient.ErrorNumber," with description ",V.Ambient.ErrorDescription,V.Local.sError)
+	F.Intrinsic.UI.Msgbox(V.Local.sError)
+Function.Intrinsic.Control.EndIf
+
+
+Program.Sub.Check.End
+
+Program.Sub.Send_Emails.Start
+'BN Jan 25, 2017
+F.Intrinsic.Control.SetErrorHandler("send_emails_Err")
+F.Intrinsic.Control.ClearErrors
+
+
+V.Local..BulkDeclareString( sError, sSubject, sBody, sFilter, sVendorID, sVendorName, sInvoice, sAmt, sTotal, sVendorEmail, sReplyEmail, sTo, sInvalidVendorEmailMessage, sCheck, ssql)
+V.Local..BulkDeclareLong(iID, iCounter, iCounterView)
+v.Local.dcheckdate.Declare(date)
+v.Local.bValidReplyEmail.Declare(boolean)
+v.Local.scheckdate.declare(string)
+
+v.Local.scheckdate.Set(v.Ambient.Date.formatMM/DD/YYYY)
+v.Local.dcheckdate.Set(v.Local.scheckdate)
+f.Intrinsic.Date.DateAdd("W",-5,v.Local.dcheckdate,v.Local.dcheckdate)
+
+'Input reply email
+F.Intrinsic.Control.DoUntil(V.Local.bValidReplyEmail,=,True)
+	Function.Intrinsic.UI.InputBox ("Please input a reply email", "Reply email", 0, variable.local.sReplyEmail)
+	'Checking for valid email
+	F.Intrinsic.String.Split(V.Local.sReplyEmail.Trim,"@",V.Local.sCheck)
+	F.Intrinsic.Control.If(V.Local.sCheck.UBound,<>,1)	
+		F.Intrinsic.UI.Msgbox("Invalid email address @.","Invalid Email")		
+	F.Intrinsic.Control.Else	
+		F.Intrinsic.String.Split(V.Local.sCheck(1),".",V.Local.sCheck)
+		F.Intrinsic.Control.If(V.Local.sCheck.UBound,<,1)
+			F.Intrinsic.UI.Msgbox("Invalid email address after @","Invalid Email")			
+		F.Intrinsic.Control.Else
+			v.Local.bValidReplyEmail.Set(True)
+		f.Intrinsic.Control.Endif
+	F.Intrinsic.Control.EndIf
+F.Intrinsic.Control.Loop
+
+f.Intrinsic.UI.InvokeWaitDialog("Sending email to vendors","GAB message")
+
+f.Intrinsic.Control.For(v.Local.iCounter,0,v.DataTable.VendorHeader_DT.RowCount--,1)
+	v.Local.sVendorID.Set(V.DataTable.VendorHeader_DT(v.Local.iCounter).Vendor_ID!FieldValString)
+	v.Local.sVendorName.Set(V.DataTable.VendorHeader_DT(v.Local.iCounter).Name!FieldValString)
+	v.Local.sTotal.Set(V.DataTable.VendorHeader_DT(v.Local.iCounter).Total!FieldValString)
+	v.Local.sVendorEmail.Set(V.DataTable.VendorHeader_DT(v.Local.iCounter).Email!FieldValString)
+	
+	'Checking for valid vendor email
+	F.Intrinsic.String.Split(V.Local.sVendorEmail.Trim,"@",V.Local.sCheck)	
+	f.Intrinsic.String.Concat("Vendor: ",v.Local.sVendorID, " Name: ",v.Local.sVendorName, " does not have a valid email address..",v.Local.sInvalidVendorEmailMessage)
+	
+	F.Intrinsic.Control.If(V.Local.sCheck.UBound,<>,1)
+		F.Intrinsic.UI.Msgbox(v.Local.sInvalidVendorEmailMessage,"Invalid Email")		
+	F.Intrinsic.Control.Else	
+		F.Intrinsic.String.Split(V.Local.sCheck(1),".",V.Local.sCheck)		
+		F.Intrinsic.Control.If(V.Local.sCheck.UBound,<,1)		
+			F.Intrinsic.UI.Msgbox(v.Local.sInvalidVendorEmailMessage,"Invalid Email")					
+		F.Intrinsic.Control.Else		
+		
+		
+			'This is a valid vendor email, we can go ahead
+			F.Intrinsic.String.Build("Vendor: {0} - {1}",v.Local.sVendorID, "ACH Payment Notification", v.Local.sSubject)
+			F.Intrinsic.String.Build("Company: {0}{1}Name: {2}{3}{3}",v.Local.sVendorID,V.Ambient.NewLine,v.Local.sVendorName,V.Ambient.NewLine,V.Local.sBody)	
+			
+			V.Local.sSQL.Set("")
+			'F.Intrinsic.String.Build("SELECT VENDOR_ID, INVOICE_NO, CHECK_AMT FROM V_ACH_PAYMENT WHERE VENDOR_ID = '{0}' AND EXPORTED = '';",V.Local.sVendorID, V.Local.sSQL)
+			F.Intrinsic.String.Build("SELECT VENNO AS VENDOR_ID, INV_NO AS INVOICE_NO, NET AS CHECK_AMT FROM V_ACH_DTL_INV WHERE VENNO = '{0}' AND CHKNO IN (SELECT KEY_NUM FROM V_ACH_PAYMENT WHERE EXPORTED = '');",V.Local.sVendorID, V.Local.sSQL)
+			
+			f.Data.DataTable.CreateFromSQL("Details_DT","con",v.Local.sSQL,true)
+			
+			'commented out as we do not need a filter any longer	
+'			F.Intrinsic.String.Build("VENDOR_ID = '{0}'", v.Local.sVendorID,v.Local.sFilter)
+			Function.Data.DataView.Create("Details_DT", "Details_DV", 22, V.Local.sFilter, "")
+			
+			'Loop through dataview
+			F.Intrinsic.Control.For(V.Local.iCounterView,0,Variable.DataView.Details_DT!Details_DV.RowCount--, 1)
+				'build 2 strings here: invoice and amount
+				V.Local.sInvoice.Set(Variable.DataView.Details_DT!Details_DV(V.Local.iCounterView).INVOICE_NO!FieldValString)
+				V.Local.sAmt.Set(Variable.DataView.Details_DT!Details_DV(V.Local.iCounterView).CHECK_AMT!FieldValString)
+				F.Intrinsic.String.Build("{0}Invoice: {1} Amount: {2}{3}",v.Local.sBody,v.Local.sInvoice,V.Local.sAmt,V.Ambient.NewLine,V.Local.sBody)	
+			F.Intrinsic.Control.Next(V.Local.iCounterView)
+			
+			F.Data.DataView.Close("Details_DT", "Details_DV")
+			F.Data.DataTable.Close("Details_DT")
+			
+			F.Intrinsic.String.Build("{0}Total:                                                {1}{2}{2}Thank you",v.Local.sBody,v.Local.sTotal,V.Ambient.NewLine,V.Local.sBody)			
+			F.Global.Security.getuserID(V.Caller.User,V.Caller.CompanyCode,V.Local.iID)
+			F.Intrinsic.String.Build("{0}@!@{1}", v.Local.sVendorEmail.Trim,v.Local.sReplyEmail.Trim, V.Local.sTo)
+			
+			
+'			Function.Global.Messaging.QueueMessage(V.Caller.CompanyCode, v.Local.iID, "", V.Local.sSubject, v.Local.sReplyEmail, v.Local.sTo, v.Local.sBody)
+			Function.Global.Messaging.QueueMessage(V.Caller.CompanyCode, v.Local.iID, "GCG_4330_Email_ACH", V.Local.sSubject, v.Local.sReplyEmail.Trim, v.Local.sTo, v.Local.sBody)						
+		f.Intrinsic.Control.Endif
+	F.Intrinsic.Control.EndIf
+F.Intrinsic.Control.Next(V.Local.iCounter)
+
+F.Intrinsic.UI.CloseWaitDialog
+
+F.Intrinsic.Control.ExitSub
+
+F.Intrinsic.Control.Label("send_emails_Err")
+F.Intrinsic.Control.If(V.Ambient.ErrorNumber,<>,0)
+	Function.Intrinsic.String.Concat("Project: GCG_4330_Email_ACH.g2u",V.Ambient.Newline,V.Ambient.Newline,"Subroutine: ",V.Ambient.CurrentSubroutine,V.Ambient.NewLine,"Error Occurred ",V.Ambient.ErrorNumber," with description ",V.Ambient.ErrorDescription,V.Local.sError)
+	F.Intrinsic.UI.Msgbox(V.Local.sError)
+	Function.Intrinsic.Control.CallSub(unload)
+Function.Intrinsic.Control.EndIf
+
+Program.Sub.Send_Emails.End
+
+Program.Sub.Unload.Start
+F.ODBC.Connection!con.Close
+F.Intrinsic.Control.End
+
+Program.Sub.Unload.End
+
+Program.Sub.State.Start
+'Spell out State
+V.Local.sState.Declare(String)
+'Pass arg = state
+V.Local.sState.Set(V.Args.State)
+F.Intrinsic.Control.SelectCase(V.Local.sState)
+    F.Intrinsic.Control.Case("AL")
+		V.Local.sState.Set("Alabama")
+	F.Intrinsic.Control.Case("AK")
+		V.Local.sState.Set("Alaska")
+ 	F.Intrinsic.Control.Case("AZ")
+		V.Local.sState.Set("Arizona")
+	F.Intrinsic.Control.Case("AR")
+		V.Local.sState.Set("Arkansas")
+	F.Intrinsic.Control.Case("CA")
+		V.Local.sState.Set("California")
+	F.Intrinsic.Control.Case("CO")
+		V.Local.sState.Set("Colorado")
+	F.Intrinsic.Control.Case("CT")
+		V.Local.sState.Set("Connecticut")
+	F.Intrinsic.Control.Case("DE")
+		V.Local.sState.Set("Delaware")
+	F.Intrinsic.Control.Case("DC")
+		V.Local.sState.Set("District of Columbia")
+	F.Intrinsic.Control.Case("FL")
+		V.Local.sState.Set("Florida")
+	F.Intrinsic.Control.Case("GA")
+		V.Local.sState.Set("Georgia")
+	F.Intrinsic.Control.Case("HI")
+		V.Local.sState.Set("Hawaii")
+	F.Intrinsic.Control.Case("ID")
+		V.Local.sState.Set("Idaho")
+	F.Intrinsic.Control.Case("IL")
+		V.Local.sState.Set("Illinois")
+	F.Intrinsic.Control.Case("IN")
+		V.Local.sState.Set("Indiana")
+	F.Intrinsic.Control.Case("IA")
+		V.Local.sState.Set("Iowa")
+	F.Intrinsic.Control.Case("KS")
+		V.Local.sState.Set("Kansas")
+	F.Intrinsic.Control.Case("KY")
+		V.Local.sState.Set("Kentucky")
+	F.Intrinsic.Control.Case("LA")
+		V.Local.sState.Set("Louisiana")
+	F.Intrinsic.Control.Case("ME")
+		V.Local.sState.Set("Maine")
+	F.Intrinsic.Control.Case("MD")
+		V.Local.sState.Set("Maryland")
+   	F.Intrinsic.Control.Case("MA")
+		V.Local.sState.Set("Massachusetts")
+	 F.Intrinsic.Control.Case("MI")
+		V.Local.sState.Set("Michigan")
+ 	F.Intrinsic.Control.Case("MN")
+		V.Local.sState.Set("Minnesota")
+	F.Intrinsic.Control.Case("MS")
+		V.Local.sState.Set("Mississippi")
+	F.Intrinsic.Control.Case("MO")
+		V.Local.sState.Set("Missouri")
+	F.Intrinsic.Control.Case("MT")
+		V.Local.sState.Set("Montana")
+	F.Intrinsic.Control.Case("NE")
+		V.Local.sState.Set("Nebraska")
+	F.Intrinsic.Control.Case("NV")
+		V.Local.sState.Set("Nevada")
+	F.Intrinsic.Control.Case("NH")
+		V.Local.sState.Set("New Hampshire")
+	F.Intrinsic.Control.Case("NJ")
+		V.Local.sState.Set("New Jersey")
+	F.Intrinsic.Control.Case("NM")
+		V.Local.sState.Set("New Mexico")
+	F.Intrinsic.Control.Case("NY")
+		V.Local.sState.Set("New York")
+	F.Intrinsic.Control.Case("NC")
+		V.Local.sState.Set("North Carolina")
+	F.Intrinsic.Control.Case("ND")
+		V.Local.sState.Set("North Dakota")
+	F.Intrinsic.Control.Case("OH")
+		V.Local.sState.Set("Ohio")
+	F.Intrinsic.Control.Case("OK")
+		V.Local.sState.Set("Oklahoma")
+	F.Intrinsic.Control.Case("OR")
+		V.Local.sState.Set("Oregon")
+	F.Intrinsic.Control.Case("PA")
+		V.Local.sState.Set("Pennsylvania")
+	F.Intrinsic.Control.Case("RI")
+		V.Local.sState.Set("Rhode Island")
+	F.Intrinsic.Control.Case("SC")
+		V.Local.sState.Set("South Carolina")
+	F.Intrinsic.Control.Case("SD")
+		V.Local.sState.Set("South Dakota")
+	F.Intrinsic.Control.Case("TN")
+		V.Local.sState.Set("Tennessee")
+	F.Intrinsic.Control.Case("TX")
+		V.Local.sState.Set("Texas")
+	F.Intrinsic.Control.Case("UT")
+		V.Local.sState.Set("Utah")
+	F.Intrinsic.Control.Case("VT")
+		V.Local.sState.Set("Vermont")
+	F.Intrinsic.Control.Case("VA")
+		V.Local.sState.Set("Virginia")
+	F.Intrinsic.Control.Case("WA")
+		V.Local.sState.Set("Washington")
+	F.Intrinsic.Control.Case("WV")
+		V.Local.sState.Set("West Virginia")
+	F.Intrinsic.Control.Case("WI")
+		V.Local.sState.Set("Wisconsin")
+	F.Intrinsic.Control.Case("WY")
+		V.Local.sState.Set("Wyoming")
+	'F.Intrinsic.Control.CaseElse
+F.Intrinsic.Control.EndSelect	
+V.Global.sState.Set(V.Local.sState)
+Program.Sub.State.End
+
+Program.Sub.Comments.Start
+${$0$}$GCG_ACH_XACT$}$ERIC$}$9/5/2012$}$False
+${$3$}$0$}$$}$-1$}$-1$}$$}$1/1/1900$}$Quote 3904 - ACH file export
+${$5$}$2.0.0.0$}$2
+${$6$}$triley$}$20220714115506435$}$iK6nerqp9nur1h1iSBfRKBBz1ENCgYv6Ef9FDCogv36CvhiENks7qTbgPddyDG4mXZI4n7Ge5p4=
+Program.Sub.Comments.End
+
